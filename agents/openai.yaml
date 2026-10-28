@@ -1,0 +1,4 @@
+interface:
+  display_name: "Miles-侦探-Skill"
+  short_description: "深挖人物公开足迹，追寻人生细节，写成有现场感、可追溯来源的真实人生故事"
+  default_prompt: "用 $miles-detective 尽可能深入搜索这位人物的公开经历与互联网足迹，依据材料写出生动的人生故事，让我进入其当时的处境，并附来源和未解线索。"

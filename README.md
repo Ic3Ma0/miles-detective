@@ -18,6 +18,8 @@
 
 **正文之外，还会交付一份资料附卷**：时间线、来源目录、访问台账、覆盖与缺口、未解线索。你随时可以回去核对任何一句话是从哪儿来的。
 
+如果要把案例当宣传材料，先展示侦探过程：两三个关键证据现场、保留了哪些矛盾、哪些线索没查下去，再链到完整故事。只交一篇传记，读者看不出这个技能和普通写作的区别。
+
 ## 适合什么
 
 - 人物研究：公众人物、创业者、创作者、已故作者
@@ -67,9 +69,12 @@ cp -r miles-detective ~/.claude/skills/
 4. 追到可取得的最早材料，不只依赖网页存档
 5. 区分「搜索命中、部分正文、完整正文、实际核听」
 6. 按矛盾和空白重新检索
-7. 更新覆盖表与线索队列
+7. 更新覆盖表、事件台账、图片与授权记录、下一轮查询队列
+8. 交付前回扫保存页的链接、校验事件台账、写 `delivery.json`、核对预算与停止条件，并过一遍读者检查（年龄、姓名、配图、重大转折）
 
 搜了什么、读到第几层、哪里失败，全部落盘。
+
+如果材料已经准备好，或你要求不联网，它会切到「案头核读」：不假装检索，直接做材料—断言—定位映射。续查时默认交付合并总卷，逐段标出继承、重读、新增与修正；只有你要求补充卷时，才只交本轮新增。
 
 ## 目录结构
 
@@ -78,15 +83,40 @@ miles-detective/
 ├── SKILL.md                      主流程与边界
 ├── references/
 │   ├── source-map.md             按人物类型选择检索渠道
-│   ├── evidence-and-records.md   来源分级、引语核验、台账规范
+│   ├── evidence-and-records.md   来源分级、引语核验、结论状态、台账规范
+│   ├── event-ledger.md           事件台账、去重合并、下一轮查询与预算
 │   ├── life-story.md             从材料到人生叙事的写法
 │   └── dossier-format.md         资料交付格式
 ├── scripts/
 │   ├── research_log.py           检索台账（纯标准库，不联网）
-│   └── test_research_log.py      11 项行为测试
+│   ├── test_research_log.py      25 项行为测试
+│   ├── extract_links.py          保存页链接提取（纯标准库，不联网）
+│   ├── test_extract_links.py     12 项行为测试
+│   ├── check_events.py           独立 events.json 结构校验（纯标准库）
+│   ├── test_check_events.py      11 项行为测试
+│   ├── check_delivery.py         交付头与下一轮计划校验（纯标准库）
+│   └── test_check_delivery.py    10 项行为测试
 └── agents/
     └── openai.yaml               跨 Agent 元数据
 ```
+
+## 交付前自检
+
+```bash
+python3 scripts/extract_links.py raw/ --recursive --json --output raw/links.json
+```
+
+```bash
+python3 scripts/check_events.py raw/events.json
+```
+
+```bash
+python3 scripts/check_delivery.py outputs/delivery.json
+```
+
+把输出与 `records.jsonl`、来源目录和线索队列对照；页面里有、台账里没有的原文、附件、历史域名和本人账号地址，补成线索或写明为何不用。`check_events.py` 会拒绝缺 `scope`/`evidence_type` 的事件，以及同组来源或单源支撑的 `corroborated` 事件。`check_delivery.py` 会拒绝缺预算、缺停止原因或下一轮计划缺停止条件的交付。完整检查表见 `references/dossier-format.md`。
+
+故事还要过一遍读者检查：首次出现有没有出生日期和本名，各阶段能不能看出当时年龄，重要年代有没有图片或图位，重大转折是不是只有一句，图注有没有混入摄影署名、许可证或「不是……」排除句，正文有没有混入「本轮未取得」这类台账语言。
 
 ## 边界
 

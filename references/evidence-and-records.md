@@ -15,6 +15,10 @@
 
 保留工具返回原文于案例工作目录；面向读者提供摘要、短引文和定位，不批量复制整本书或完整节目字幕。日志中不保存登录凭据或无关私人联系方式。
 
+保存网页时同时保留正文与链接表：锚文本、完整 `href`、所在标题或段落。只做纯文本抽取会丢掉原文、附件和旧域名地址。交付前用 `scripts/extract_links.py` 回扫每个保存的 HTML，把结果与台账、来源目录和线索队列对照；页面里有而台账里没有的地址，补成线索或写明为何不用。
+
+案头核读时没有检索和访问记录，不要为凑结构补假记录；若台账需要覆盖记录，写一条「按提供材料核读」，材料清单保留原始取得层级。案头核读仍可用 `records.jsonl` 记来源、结论、事件、线索和覆盖，或用事件的 `sources` 文件定位；没有检索/访问记录不等于不能记事件。合并总卷时，按交付格式逐段标注继承、重读、新增与修正。
+
 ## 身份与来源独立性
 
 对账号归属分为：confirmed（强公开关联，如组织原始公告指向本人账号）、supported（同期可核对的资料支持）、unresolved（仅同名或未经核对）、not_applicable（无需绑定人物的编目/机构记录）。记录实际依据，等级只是摘要。更名/转让/仿冒风险按相关日期检查，不能把2011年的归属推广到所有时期。姓名异体、同音形近字和语音转录错字分别检索，引用时保留原始页面用字。
@@ -32,6 +36,17 @@
 - OCR/转写：保存原件定位，关键人名、数字、否定词回看/核听。乱码、字体映射异常不能凭语感修成直接引语。
 
 来源访问状态与证据类型不能混在一个“可信度”分数里。机构公告证明公告内容，未必证明公告中转述的业绩；原始指控证明有人提出指控，未必证明指控属实。
+
+## 结论状态
+
+`claim.status` 不是可信度分数，而是这条陈述目前的证据关系。标 `corroborated` 前逐条回答：
+
+1. **两个来源是否各自独立取得？** 同一稿件的转载、同一采访的全文/剪辑/翻译、同一机构的通稿与转载、同一作者改写，只算一组。
+2. **两个来源是否都指向同一原始材料？** 如果是，仍是单源。台账里有两个编号，不等于两份独立证据。
+3. **两个来源支持的是同一原子陈述吗？** 把“公司宣布收购”和“收购完成”拆开；不能用前者支持后者。
+4. **两个来源是否有相同的利益关系，或由同一方提供？** 同一方声明经两家媒体转述，不构成独立证实。
+
+只有两个独立来源都支持同一原子陈述，才用 `corroborated`；否则用 `documented_statement`（材料确实这样记载）或 `disputed`（有实质相反证据）。`documented_statement` 不表示叙述为真，`disputed` 也不表示双方各错一半。标 `corroborated` 时，在 `evidence` 里列出这两个来源，并在来源记录中写明同源组。
 
 ## 日期、版本和摘记
 
@@ -80,7 +95,18 @@ python3 <技能目录>/scripts/research_log.py report <案例目录> --output <�
 `source.voice`：self / other / mixed / unresolved；`form`：original / reprint / quote / catalog / program_notes / institution_record / unknown。
 `source.access`：full_text / partial_text / metadata_only / search_only / unretrieved / transcript / audio_video_reviewed。
 `claim.status`：documented_statement / corroborated / disputed / unverified / analysis。`documented_statement` 表示材料确实这样记载，不表示其叙述为真。
+`event.status`：documented / corroborated / disputed / unverified；`event.date_precision`：day / month / year / range / unknown。
 `clue.state`：open / blocked / resolved / deferred；`coverage.state`：unsearched / searched / partial / blocked / deferred / not_applicable。
+
+事件记录用 `kind: event`，至少引用一个来源、结论或文件定位：
+
+```json
+{"kind":"event","id":"EV01","date":"2001-06-11","date_precision":"day","scope":"main","evidence_type":"journalist_report","title":"CNNIC 办公室会面","summary":"毛伟提出八条合作条件，双方开始六次面谈。","place":"北京中关村","people":["周鸿祎","毛伟"],"consequence":"","status":"documented","source_ids":["S03"],"claim_ids":["C11"],"sources":[{"source_id":"S03","lines":"11-30"}],"same_event_group":"cnnic-2001"}
+```
+
+`scope` 必填：`main` / `background` / `outside_window`；`evidence_type` 必填：`self_account` / `journalist_report` / `institution_record` / `mixed` / `unknown`。案头核读没有 `records.jsonl` 时，用 `sources: [{"file":"V01.txt","lines":"12"}]` 定位；不需要为凑结构补检索或访问记录。
+
+来源记录可加 `same_source_group`。标 `corroborated` 的事件必须给每个来源写组，且至少两个不同组；脚本会拒绝同组来源、缺组来源和只有一个来源的 corroborated 事件。字段、去重和合并规则见 [事件台账](event-ledger.md)。转载不新建事件；同一事件的多篇报道共用一个 `same_event_group`。
 
 来源有 `discovery_ids` 可指向检索；实际取得内容时须有相应访问记录。结论格式：
 

@@ -22,6 +22,10 @@ ENUMS = {
         "identity": {"confirmed", "supported", "unresolved", "not_applicable"},
     },
     "claim": {"status": {"documented_statement", "corroborated", "disputed", "unverified", "analysis"}},
+    "event": {"status": {"documented", "corroborated", "disputed", "unverified"},
+              "date_precision": {"day", "month", "year", "range", "unknown"},
+              "scope": {"main", "background", "outside_window"},
+              "evidence_type": {"self_account", "journalist_report", "institution_record", "mixed", "unknown"}},
     "clue": {"state": {"open", "blocked", "resolved", "deferred"}, "priority": {"high", "medium", "low"}},
     "coverage": {"state": {"unsearched", "searched", "partial", "blocked", "deferred", "not_applicable"}},
 }
@@ -30,6 +34,7 @@ REQUIRED = {
     "visit": ("url", "method", "detail", "raw_path"),
     "source": ("title", "url", "limitation"),
     "claim": ("text",),
+    "event": ("title", "summary", "status", "date_precision", "scope", "evidence_type"),
     "clue": ("question", "next_step"),
     "coverage": ("family", "scope", "reason"),
 }
@@ -102,6 +107,8 @@ def validate(items, case):
             visits = refs("visit_ids", "visit")
             discoveries = refs("discovery_ids", "search")
             access = record["access"]
+            if "same_source_group" in record and not nonempty(record["same_source_group"]):
+                raise RecordError(f"{rid}: same_source_group 不能为空")
             if access == "search_only" and not discoveries:
                 raise RecordError(f"{rid}: 仅摘要须引用实际检索")
             if access in ACCESS_OUTCOMES and not any(latest[v]["outcome"] in ACCESS_OUTCOMES[access] for v in visits):
@@ -123,6 +130,76 @@ def validate(items, case):
                     usable = True
             if record["status"] != "unverified" and not usable:
                 raise RecordError(f"{rid}: 已记载/分析结论不能只有未取得材料或搜索摘要")
+        elif kind == "event":
+            sources = refs("source_ids", "source")
+            claims = refs("claim_ids", "claim")
+            locators = record.get("sources", [])
+            if not isinstance(locators, list):
+                raise RecordError(f"{rid}: sources 须为数组")
+            if not sources and not claims and not locators:
+                raise RecordError(f"{rid}: 事件须引用至少一个来源、结论或定位")
+            locator_source_ids = []
+            for loc in locators:
+                if not isinstance(loc, dict):
+                    raise RecordError(f"{rid}: sources 项须为对象")
+                explicit = loc.get("source_id")
+                sid = explicit or loc.get("id")
+                file_name = loc.get("file")
+                if not nonempty(sid) and not nonempty(file_name):
+                    raise RecordError(f"{rid}: sources 项须有 source_id、id 或 file")
+                if nonempty(explicit):
+                    if explicit not in latest or kinds[explicit] != "source":
+                        raise RecordError(f"{rid}: 未知来源引用 {explicit!r}")
+                    locator_source_ids.append(explicit)
+                elif nonempty(sid) and sid in latest and kinds[sid] == "source":
+                    locator_source_ids.append(sid)
+                if "lines" in loc and not nonempty(str(loc["lines"])):
+                    raise RecordError(f"{rid}: sources.lines 不能为空")
+                if "group" in loc and not nonempty(loc["group"]):
+                    raise RecordError(f"{rid}: sources.group 不能为空")
+            if record["date_precision"] != "unknown" and not nonempty(record.get("date")):
+                raise RecordError(f"{rid}: 非 unknown 日期精度须有 date")
+            if "people" in record and (not isinstance(record["people"], list) or not all(nonempty(p) for p in record["people"])):
+                raise RecordError(f"{rid}: people 须为非空字符串数组")
+            if "same_event_group" in record and not nonempty(record["same_event_group"]):
+                raise RecordError(f"{rid}: same_event_group 不能为空")
+            if record["status"] != "unverified":
+                usable_source = any(latest[s]["access"] not in {"unretrieved", "search_only"} for s in sources)
+                usable_claim = any(latest[c]["status"] != "unverified" for c in claims)
+                if not (usable_source or usable_claim or locators):
+                    raise RecordError(f"{rid}: 已记载事件不能只有未取得材料或搜索摘要")
+            if record["status"] == "corroborated":
+                keys = {f"id:{sid}" for sid in sources}
+                for loc in locators:
+                    sid = loc.get("source_id") or loc.get("id")
+                    if nonempty(sid):
+                        keys.add(f"id:{sid}")
+                    elif nonempty(loc.get("file")):
+                        keys.add(f"file:{loc['file']}")
+                if len(keys) < 2:
+                    raise RecordError(f"{rid}: corroborated 事件至少需要两个不同来源")
+                groups = set()
+                for sid in dict.fromkeys(sources + locator_source_ids):
+                    group = latest[sid].get("same_source_group")
+                    if not nonempty(group):
+                        raise RecordError(f"{rid}: corroborated 来源 {sid} 须标 same_source_group")
+                    groups.add(group)
+                for loc in locators:
+                    sid = loc.get("source_id") or loc.get("id")
+                    if nonempty(sid):
+                        group = loc.get("group")
+                        if sid in latest and kinds[sid] == "source":
+                            group = group or latest[sid].get("same_source_group")
+                        if not nonempty(group):
+                            raise RecordError(f"{rid}: corroborated 的来源 {sid} 须标 group")
+                        groups.add(group)
+                    else:
+                        group = loc.get("group")
+                        if not nonempty(group):
+                            raise RecordError(f"{rid}: corroborated 的文件定位须标 group")
+                        groups.add(group)
+                if len(groups) < 2:
+                    raise RecordError(f"{rid}: corroborated 的来源属于同一同源组")
         elif kind == "clue":
             refs("origin_ids", required=True)
         elif kind == "coverage":
@@ -167,6 +244,13 @@ def cell(value):
     return str(value).replace("|", "\\|").replace("\n", " ")
 
 
+def event_date_key(record):
+    date = record.get("date") or ""
+    if not date or date == "unknown" or record.get("date_precision") == "unknown":
+        date = "9999"
+    return date, record["id"]
+
+
 def report(case):
     case = Path(case)
     events = records(case)
@@ -175,11 +259,24 @@ def report(case):
     by_kind = {k: [r for r in latest.values() if r["kind"] == k] for k in REQUIRED}
     counts = Counter(r["access"] for r in by_kind["source"])
     lines = [f"# {meta['person']}｜研究记录摘要", "", f"本轮范围：{meta['scope']}", "",
-             f"保留 {len(events)} 条事件；检索批次 {len(by_kind['search'])}，查询词 {sum(len(r['queries']) for r in by_kind['search'])}，访问行为 {len(by_kind['visit'])}，来源条目 {len(by_kind['source'])}。", "",
+             f"保留 {len(events)} 条记录；检索批次 {len(by_kind['search'])}，查询词 {sum(len(r['queries']) for r in by_kind['search'])}，访问行为 {len(by_kind['visit'])}，来源条目 {len(by_kind['source'])}，时间线事件 {len(by_kind['event'])}。", "",
              "这些数量不代表独立证据数、事实准确率或互联网覆盖率。记录时间不等于实际访问时间。", "", "获取层级：" + json.dumps(dict(counts), ensure_ascii=False), "",
              "| 来源 | 标题 | 获取层级 | 地址 | 限制 |", "|---|---|---|---|---|"]
     for r in by_kind["source"]:
         lines.append("| " + " | ".join(cell(r[k]) for k in ("id", "title", "access", "url", "limitation")) + " |")
+    if by_kind["event"]:
+        lines.extend(["", "| 日期 | 精度 | 范围 | 事件 | 地点 | 状态 | 证据类型 | 来源/结论 |", "|---|---|---|---|---|---|---|---|"])
+        for r in sorted(by_kind["event"], key=event_date_key):
+            parts = list(r.get("source_ids", [])) + list(r.get("claim_ids", []))
+            for loc in r.get("sources", []):
+                label = loc.get("source_id") or loc.get("id") or loc.get("file", "")
+                if loc.get("lines"):
+                    label += f" L{loc['lines']}"
+                parts.append(label)
+            refs = ", ".join(dict.fromkeys(parts))
+            lines.append("| " + " | ".join(cell(v) for v in (
+                r.get("date", ""), r["date_precision"], r.get("scope", ""), r["title"],
+                r.get("place", ""), r["status"], r.get("evidence_type", ""), refs)) + " |")
     lines.extend(["", "| 来源家族 | 状态 | 实际范围 | 原因 |", "|---|---|---|---|"])
     for r in by_kind["coverage"]:
         lines.append("| " + " | ".join(cell(r[k]) for k in ("family", "state", "scope", "reason")) + " |")

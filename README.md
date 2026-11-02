@@ -90,6 +90,7 @@ miles-detective/
 │   ├── event-ledger.md           事件台账、去重合并、下一轮查询与预算
 │   ├── parallel-investigation.md 分片契约、预算、合并与冲突裁决
 │   ├── life-story.md             从材料到人生叙事的写法
+│   ├── social-platforms.md       登录墙平台的取回层级与脚本
 │   └── dossier-format.md         资料交付格式
 ├── scripts/
 │   ├── research_log.py           检索台账与分片合并（纯标准库，不联网）
@@ -101,7 +102,11 @@ miles-detective/
 │   ├── check_delivery.py         交付头与下一轮计划校验（纯标准库）
 │   ├── test_check_delivery.py    18 项行为测试
 │   ├── package.py                打包、哈希与索引更新（维护用）
-│   └── test_package.py           4 项行为测试
+│   ├── test_package.py           4 项行为测试
+│   ├── social_fetch.py           登录态浏览器取回（需 Playwright）
+│   ├── mediacrawler.py           批量采集入口（需 MediaCrawler 与 Chrome 调试端口）
+│   ├── mc_to_records.py          采集结果写入台账（纯标准库）
+│   └── test_mc_to_records.py     7 项行为测试
 └── agents/
     └── openai.yaml               跨 Agent 元数据
 ```

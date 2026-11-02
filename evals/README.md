@@ -10,6 +10,7 @@ python3 scripts/test_extract_links.py
 python3 scripts/test_check_events.py
 python3 scripts/test_check_delivery.py
 python3 scripts/test_package.py
+python3 scripts/test_mc_to_records.py
 ```
 
 其中 `test_research_log.py` 的 `MergeTests` 覆盖分片合并：编号重映射、引用与 `raw_path` 重写、同 URL 来源去重、跨分片事件合并、重复候选、冲突保留、非空主台账拒绝覆盖、`--dry-run` 不落盘。`test_check_delivery.py` 覆盖 `parallel` 段的 worker 上限、分片停止原因、合并报告与计数。

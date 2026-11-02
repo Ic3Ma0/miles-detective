@@ -93,7 +93,7 @@ miles-detective/
 │   └── dossier-format.md         资料交付格式
 ├── scripts/
 │   ├── research_log.py           检索台账与分片合并（纯标准库，不联网）
-│   ├── test_research_log.py      33 项行为测试
+│   ├── test_research_log.py      34 项行为测试
 │   ├── extract_links.py          保存页链接提取（纯标准库，不联网）
 │   ├── test_extract_links.py     12 项行为测试
 │   ├── check_events.py           独立 events.json 结构校验（纯标准库）

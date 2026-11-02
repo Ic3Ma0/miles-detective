@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -382,6 +384,16 @@ class MergeTests(unittest.TestCase):
         self.assertTrue(merged)
         self.assertFalse((self.case / "records.jsonl").exists())
         self.assertFalse((self.case / "merge-report.json").exists())
+
+    def test_report_cli_still_works_after_merge_subcommand(self):
+        (self.case / "case.json").write_text(json.dumps({"person": "测试人物", "scope": "夹具"}), encoding="utf-8")
+        (self.case / "records.jsonl").write_text("", encoding="utf-8")
+        script = Path(__file__).with_name("research_log.py")
+        proc = subprocess.run(
+            [sys.executable, str(script), "report", str(self.case)],
+            capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("测试人物", proc.stdout)
 
 
 if __name__ == "__main__":

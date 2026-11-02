@@ -617,13 +617,13 @@ def main():
             validate(items, args.case)
             print(f"结构检查通过：{len(items)} 条事件；未判断材料真实性")
         elif args.command == "merge":
-            report, merged = merge_case(
+            summary, merged = merge_case(
                 args.case, report_path=args.report, force=args.force, dry_run=args.dry_run)
             action = "试算" if args.dry_run else "合并完成"
             print(
-                f"{action}：{len(report['shards'])} 个分片，{len(merged)} 条记录；"
-                f"来源去重 {len(report['source_duplicates'])}，事件合并 {len(report['event_merged'])}，"
-                f"冲突 {len(report['conflicts'])}，状态降级 {len(report['corroborated_downgraded'])}")
+                f"{action}：{len(summary['shards'])} 个分片，{len(merged)} 条记录；"
+                f"来源去重 {len(summary['source_duplicates'])}，事件合并 {len(summary['event_merged'])}，"
+                f"冲突 {len(summary['conflicts'])}，状态降级 {len(summary['corroborated_downgraded'])}")
         else:
             result = report(args.case)
             if args.output:

@@ -2,6 +2,7 @@
 """Append-only research records. Structural checks only; no network or truth score."""
 import argparse
 from collections import Counter
+import copy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -53,6 +54,11 @@ def nonempty(value):
 
 def records(case):
     path = Path(case) / "records.jsonl"
+    return read_jsonl(path)
+
+
+def read_jsonl(path):
+    path = Path(path)
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
@@ -287,6 +293,292 @@ def report(case):
     return "\n".join(lines)
 
 
+KIND_PREFIX = {
+    "search": "Q", "visit": "V", "source": "S", "claim": "C",
+    "event": "EV", "clue": "L", "coverage": "COV",
+}
+KIND_ORDER = {kind: index for index, kind in enumerate(
+    ("search", "visit", "source", "claim", "event", "clue", "coverage"))}
+REFERENCE_FIELDS = ("visit_ids", "discovery_ids", "source_ids", "claim_ids", "origin_ids", "record_ids")
+ACCESS_RANK = {
+    "unretrieved": 0, "search_only": 1, "metadata_only": 2, "partial_text": 3,
+    "audio_video_reviewed": 4, "transcript": 4, "full_text": 5,
+}
+
+
+def id_number(record):
+    digits = "".join(ch for ch in record["id"] if ch.isdigit())
+    return int(digits) if digits else 0
+
+
+def normalized_title(value):
+    return "".join(str(value).split())
+
+
+def merge_case(case, report_path=None, force=False, dry_run=False):
+    """Merge shard ledgers into the case ledger. Structural work only.
+
+    The merge assigns stable IDs, rewrites references, deduplicates sources by
+    exact URL, merges events explicitly marked with the same event group,
+    namespaces source groups per shard, and downgrades corroborated claims or
+    events that cannot show two independent source groups afterwards. It never
+    decides which conflicting date or claim is true.
+    """
+    case = Path(case)
+    target = case / "records.jsonl"
+    if target.exists() and target.read_text(encoding="utf-8").strip() and not force:
+        raise RecordError("records.jsonl 非空；如需覆盖请加 --force")
+
+    shards_root = case / "shards"
+    if not shards_root.is_dir():
+        raise RecordError("没有分片目录 shards/")
+    shard_dirs = sorted(path for path in shards_root.iterdir() if path.is_dir())
+    if not shard_dirs:
+        raise RecordError("shards/ 下没有分片")
+
+    shard_data = []
+    seen_shard_ids = set()
+    for directory in shard_dirs:
+        meta_path = directory / "shard.json"
+        if not meta_path.is_file():
+            raise RecordError(f"{directory.name}: 缺少 shard.json")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if not isinstance(meta, dict) or not nonempty(meta.get("id")) or not nonempty(meta.get("family")):
+            raise RecordError(f"{directory.name}: shard.json 须有非空 id 与 family")
+        shard_id = meta["id"]
+        if shard_id in seen_shard_ids:
+            raise RecordError(f"分片 ID 重复：{shard_id}")
+        seen_shard_ids.add(shard_id)
+        items = read_jsonl(directory / "records.jsonl")
+        latest = validate(items, directory)
+        shard_data.append({"path": directory, "meta": meta, "items": items, "latest": latest})
+
+    counters = Counter()
+    provisional = {}
+    ordered = []
+    for shard in shard_data:
+        shard_id = shard["meta"]["id"]
+        for old_id, record in shard["latest"].items():
+            kind = record["kind"]
+            counters[kind] += 1
+            new_id = f"{KIND_PREFIX[kind]}{counters[kind]:02d}"
+            provisional[(shard_id, old_id)] = new_id
+            ordered.append((shard_id, old_id, record))
+
+    source_merge = {}
+    source_unions = {}
+    source_duplicates = []
+    first_by_url = {}
+
+    def add_source_union(kept_id, shard_id, record):
+        union = source_unions.setdefault(
+            kept_id, {"visit_ids": [], "discovery_ids": [], "accesses": [], "group": None})
+        union["visit_ids"].extend((shard_id, value) for value in record.get("visit_ids", []))
+        union["discovery_ids"].extend((shard_id, value) for value in record.get("discovery_ids", []))
+        if record.get("access"):
+            union["accesses"].append(record["access"])
+        if union["group"] is None and nonempty(record.get("same_source_group")):
+            union["group"] = f"{shard_id}/{record['same_source_group']}"
+
+    for shard_id, old_id, record in ordered:
+        if record["kind"] != "source":
+            continue
+        url = record.get("url")
+        if not nonempty(url):
+            continue
+        provisional_id = provisional[(shard_id, old_id)]
+        if url in first_by_url:
+            kept_id = first_by_url[url]
+            source_merge[provisional_id] = kept_id
+            source_duplicates.append({"url": url, "kept": kept_id, "merged": f"{shard_id}:{old_id}"})
+            add_source_union(kept_id, shard_id, record)
+        else:
+            first_by_url[url] = provisional_id
+            add_source_union(provisional_id, shard_id, record)
+
+    def final_id(shard_id, old_id):
+        key = (shard_id, old_id)
+        if key not in provisional:
+            raise RecordError(f"{shard_id}: 未知引用 {old_id!r}")
+        provisional_id = provisional[key]
+        return source_merge.get(provisional_id, provisional_id)
+
+    output = []
+    for shard_id, old_id, record in ordered:
+        provisional_id = provisional[(shard_id, old_id)]
+        if record["kind"] == "source" and provisional_id in source_merge:
+            continue
+        merged = copy.deepcopy(record)
+        merged["id"] = final_id(shard_id, old_id)
+        merged["shard_id"] = shard_id
+        for field in REFERENCE_FIELDS:
+            if field in merged:
+                merged[field] = [final_id(shard_id, ref) for ref in merged[field]]
+        for evidence in merged.get("evidence", []):
+            if "source_id" in evidence:
+                evidence["source_id"] = final_id(shard_id, evidence["source_id"])
+        for locator in merged.get("sources", []):
+            for key in ("source_id", "id"):
+                if key in locator:
+                    locator[key] = final_id(shard_id, locator[key])
+            if nonempty(locator.get("group")):
+                locator["group"] = f"{shard_id}/{locator['group']}"
+            if nonempty(locator.get("file")) and not locator["file"].startswith("shards/"):
+                locator["file"] = f"shards/{shard_id}/{locator['file']}"
+        if merged["kind"] in {"search", "visit"} and not merged["raw_path"].startswith("shards/"):
+            merged["raw_path"] = f"shards/{shard_id}/{merged['raw_path']}"
+        if nonempty(merged.get("same_source_group")):
+            merged["same_source_group"] = f"{shard_id}/{merged['same_source_group']}"
+        if merged["kind"] == "source" and provisional_id in source_unions:
+            union = source_unions[provisional_id]
+            merged["visit_ids"] = list(dict.fromkeys(
+                final_id(shard, ref) for shard, ref in union["visit_ids"]))
+            if union["discovery_ids"]:
+                merged["discovery_ids"] = list(dict.fromkeys(
+                    final_id(shard, ref) for shard, ref in union["discovery_ids"]))
+            if union["accesses"]:
+                merged["access"] = max(union["accesses"], key=lambda value: ACCESS_RANK.get(value, -1))
+            if not nonempty(merged.get("same_source_group")) and union["group"]:
+                merged["same_source_group"] = union["group"]
+        output.append(merged)
+
+    output.sort(key=lambda record: (KIND_ORDER[record["kind"]], id_number(record), record.get("shard_id", "")))
+
+    event_groups = {}
+    for record in output:
+        if record["kind"] == "event" and nonempty(record.get("same_event_group")):
+            event_groups.setdefault(record["same_event_group"], []).append(record)
+
+    event_merge = {}
+    skipped_events = set()
+    conflicts = []
+    for group, events in event_groups.items():
+        if len(events) < 2:
+            continue
+        kept = events[0]
+        for duplicate in events[1:]:
+            if duplicate.get("date") != kept.get("date") or (duplicate.get("place") or "") != (kept.get("place") or ""):
+                conflicts.append({
+                    "same_event_group": group,
+                    "events": [kept["id"], duplicate["id"]],
+                    "date": [kept.get("date"), duplicate.get("date")],
+                    "place": [kept.get("place"), duplicate.get("place")],
+                })
+                continue
+            for field in ("source_ids", "claim_ids"):
+                kept[field] = list(dict.fromkeys(kept.get(field, []) + duplicate.get(field, [])))
+            locators = kept.get("sources", []) + duplicate.get("sources", [])
+            seen = set()
+            kept["sources"] = []
+            for locator in locators:
+                marker = json.dumps(locator, ensure_ascii=False, sort_keys=True)
+                if marker not in seen:
+                    seen.add(marker)
+                    kept["sources"].append(locator)
+            event_merge[duplicate["id"]] = kept["id"]
+            skipped_events.add(duplicate["id"])
+
+    output = [record for record in output if record["id"] not in skipped_events]
+    if event_merge:
+        for record in output:
+            for field in REFERENCE_FIELDS:
+                if field in record:
+                    record[field] = [event_merge.get(ref, ref) for ref in record[field]]
+
+    duplicate_candidates = {}
+    for record in output:
+        if record["kind"] != "event":
+            continue
+        key = (record.get("date", ""), normalized_title(record.get("title", "")), record.get("place", ""))
+        duplicate_candidates.setdefault(key, []).append(record["id"])
+    duplicate_candidates = [
+        {"date": key[0], "title": key[1], "place": key[2], "events": ids}
+        for key, ids in duplicate_candidates.items() if len(ids) > 1
+    ]
+
+    sources = {record["id"]: record for record in output if record["kind"] == "source"}
+    downgraded = []
+
+    def source_groups(source_ids, locators):
+        keys, groups = set(), set()
+        for source_id in source_ids:
+            keys.add(f"id:{source_id}")
+            group = sources.get(source_id, {}).get("same_source_group")
+            if nonempty(group):
+                groups.add(group)
+        for locator in locators:
+            source_id = locator.get("source_id") or locator.get("id")
+            if nonempty(source_id):
+                keys.add(f"id:{source_id}")
+                group = locator.get("group") or sources.get(source_id, {}).get("same_source_group")
+                if nonempty(group):
+                    groups.add(group)
+            elif nonempty(locator.get("file")):
+                keys.add(f"file:{locator['file']}")
+                if nonempty(locator.get("group")):
+                    groups.add(locator["group"])
+        return keys, groups
+
+    for record in output:
+        if record["kind"] == "event" and record.get("status") == "corroborated":
+            keys, groups = source_groups(record.get("source_ids", []), record.get("sources", []))
+            if len(keys) < 2 or len(groups) < 2:
+                record["status"] = "documented"
+                record["merge_note"] = "合并后台账复核：不足两个独立来源或两个同源组，降为 documented"
+                downgraded.append({"id": record["id"], "kind": "event", "reason": record["merge_note"]})
+        elif record["kind"] == "claim" and record.get("status") == "corroborated":
+            supported = [evidence["source_id"] for evidence in record.get("evidence", [])
+                         if evidence.get("relation") == "supports" and evidence.get("source_id") in sources]
+            keys, groups = source_groups(supported, [])
+            if len(keys) < 2 or len(groups) < 2:
+                record["status"] = "documented_statement"
+                record["merge_note"] = "合并后台账复核：不足两个独立来源或两个同源组，降为 documented_statement"
+                downgraded.append({"id": record["id"], "kind": "claim", "reason": record["merge_note"]})
+
+    for index, record in enumerate(output, 1):
+        record["event_id"] = f"E{index:06d}"
+
+    validate(output, case)
+
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "shards": [
+            {
+                "id": shard["meta"]["id"],
+                "family": shard["meta"]["family"],
+                "status": shard["meta"].get("status", ""),
+                "stop_reason": shard["meta"].get("stop_reason", ""),
+                "input_records": len(shard["items"]),
+                "latest_records": len(shard["latest"]),
+            }
+            for shard in shard_data
+        ],
+        "counts": {
+            "input_records": sum(len(shard["items"]) for shard in shard_data),
+            "output_records": len(output),
+            "by_kind": dict(Counter(record["kind"] for record in output)),
+        },
+        "id_map": {
+            shard_id: {old_id: final_id(shard_id, old_id) for old_id in shard["latest"]}
+            for shard_id, shard in ((shard["meta"]["id"], shard) for shard in shard_data)
+        },
+        "source_duplicates": source_duplicates,
+        "event_merged": [{"from": duplicate, "into": kept} for duplicate, kept in event_merge.items()],
+        "duplicate_candidates": duplicate_candidates,
+        "conflicts": conflicts,
+        "corroborated_downgraded": downgraded,
+    }
+
+    if not dry_run:
+        text = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in output)
+        pending = case / "records.jsonl.pending"
+        pending.write_text(text, encoding="utf-8")
+        pending.replace(target)
+        report_file = Path(report_path) if report_path else case / "merge-report.json"
+        report_file.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return report, output
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -302,6 +594,11 @@ def main():
     output = sub.add_parser("report")
     output.add_argument("case")
     output.add_argument("--output")
+    merge = sub.add_parser("merge")
+    merge.add_argument("case")
+    merge.add_argument("--report", help="合并报告路径，默认 <案例目录>/merge-report.json")
+    merge.add_argument("--force", action="store_true", help="覆盖已有的 records.jsonl")
+    merge.add_argument("--dry-run", action="store_true", help="只计算，不写主台账与报告")
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -319,6 +616,14 @@ def main():
             items = records(args.case)
             validate(items, args.case)
             print(f"结构检查通过：{len(items)} 条事件；未判断材料真实性")
+        elif args.command == "merge":
+            report, merged = merge_case(
+                args.case, report_path=args.report, force=args.force, dry_run=args.dry_run)
+            action = "试算" if args.dry_run else "合并完成"
+            print(
+                f"{action}：{len(report['shards'])} 个分片，{len(merged)} 条记录；"
+                f"来源去重 {len(report['source_duplicates'])}，事件合并 {len(report['event_merged'])}，"
+                f"冲突 {len(report['conflicts'])}，状态降级 {len(report['corroborated_downgraded'])}")
         else:
             result = report(args.case)
             if args.output:

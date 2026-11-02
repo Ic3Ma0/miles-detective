@@ -68,16 +68,19 @@
 
 ## 附带脚本与字段
 
-案例目录与技能目录分开，按 `research/<案例编号>-<人物>/` 建立：`records.jsonl` 是脚本维护的追加日志，`raw/` 按批次保存工具原始返回（如 `B01.json`），`outputs/` 放本轮交付物，文件名带案例编号与轮次。打包技能时只含技能目录，不把案例卷进去，个案事实不写回本技能。
+案例目录与技能目录分开，按 `research/<案例编号>-<人物>/` 建立：`records.jsonl` 是脚本维护的主台账，`raw/` 按批次保存工具原始返回（如 `B01.json`），`outputs/` 放本轮交付物，文件名带案例编号与轮次。并行调查时，每个分片另写 `shards/<分片 ID>/records.jsonl`、`shards/<分片 ID>/raw/`、`shard.json` 与 `findings.md`，再由协调者合并；见 [并行调查](parallel-investigation.md)。打包技能时只含技能目录，不把案例卷进去，个案事实不写回本技能。
 
-`scripts/research_log.py` 仅用 Python 标准库。日志是 UTF-8 JSONL，每条事件追加 `recorded_at` 和递增 `event_id`，同 kind/id 的后续事件是更新快照，前一事件仍保留。单个案例串行写入，不能多代理并发写同一日志。
+`scripts/research_log.py` 仅用 Python 标准库。日志是 UTF-8 JSONL，每条事件追加 `recorded_at` 和递增 `event_id`，同 kind/id 的后续事件是更新快照，前一事件仍保留。单个台账串行写入；并行调查时 worker 只写自己的分片台账，协调者用 `merge` 合成主台账，不能让多个 worker 并发写同一个 `records.jsonl`。
 
 ```bash
 python3 <技能目录>/scripts/research_log.py init <案例目录> --person '人物名' --scope '本轮范围'
 python3 <技能目录>/scripts/research_log.py append <案例目录> --input <记录.json>
 python3 <技能目录>/scripts/research_log.py check <案例目录>
 python3 <技能目录>/scripts/research_log.py report <案例目录> --output <摘要.md>
+python3 <技能目录>/scripts/research_log.py merge <案例目录> [--report <路径>] [--dry-run]
 ```
+
+`merge` 只用于并行调查：先逐个校验分片台账，再统一编号、重写引用与 `raw_path`、按完整 URL 去重来源、合并标了同一 `same_event_group` 的事件、把同源组加上分片前缀，并在合并后把不能证明两个独立同源组的 `corroborated` 降级。日期或地点冲突只记录、不裁决；主台账只保留每个 ID 的最新状态，完整历史留在分片。细节见 [并行调查](parallel-investigation.md)。
 
 输入为一个记录或记录数组，可用 `--input -` 从标准输入读；同批引用的记录先于引用者。检索记录及访问请求事实不可改写，重试用新 ID。若核对原始输出后发现访问结果分类有误，可保留同一访问 ID，仅更正 outcome/detail，并加非空 correction_reason；旧分类仍保留在历史中，也不增加访问次数。常用字段：
 

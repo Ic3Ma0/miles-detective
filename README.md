@@ -74,6 +74,8 @@ cp -r miles-detective ~/.claude/skills/
 
 搜了什么、读到第几层、哪里失败，全部落盘。
 
+预计 ≥10 个可定位事件或覆盖 ≥5 年、且环境支持委派时，可以按来源家族分片并行调查：每个分片写独立台账，主线程负责合并、裁决与写作。小案例、案头核读与不支持委派的环境保持单线程。
+
 如果材料已经准备好，或你要求不联网，它会切到「案头核读」：不假装检索，直接做材料—断言—定位映射。续查时默认交付合并总卷，逐段标出继承、重读、新增与修正；只有你要求补充卷时，才只交本轮新增。
 
 ## 目录结构
@@ -81,21 +83,25 @@ cp -r miles-detective ~/.claude/skills/
 ```
 miles-detective/
 ├── SKILL.md                      主流程与边界
+├── VERSION                       当前版本标识
 ├── references/
 │   ├── source-map.md             按人物类型选择检索渠道
 │   ├── evidence-and-records.md   来源分级、引语核验、结论状态、台账规范
 │   ├── event-ledger.md           事件台账、去重合并、下一轮查询与预算
+│   ├── parallel-investigation.md 分片契约、预算、合并与冲突裁决
 │   ├── life-story.md             从材料到人生叙事的写法
 │   └── dossier-format.md         资料交付格式
 ├── scripts/
-│   ├── research_log.py           检索台账（纯标准库，不联网）
-│   ├── test_research_log.py      25 项行为测试
+│   ├── research_log.py           检索台账与分片合并（纯标准库，不联网）
+│   ├── test_research_log.py      33 项行为测试
 │   ├── extract_links.py          保存页链接提取（纯标准库，不联网）
 │   ├── test_extract_links.py     12 项行为测试
 │   ├── check_events.py           独立 events.json 结构校验（纯标准库）
 │   ├── test_check_events.py      11 项行为测试
 │   ├── check_delivery.py         交付头与下一轮计划校验（纯标准库）
-│   └── test_check_delivery.py    10 项行为测试
+│   ├── test_check_delivery.py    18 项行为测试
+│   ├── package.py                打包、哈希与索引更新（维护用）
+│   └── test_package.py           4 项行为测试
 └── agents/
     └── openai.yaml               跨 Agent 元数据
 ```
@@ -113,6 +119,12 @@ python3 scripts/check_events.py raw/events.json
 ```bash
 python3 scripts/check_delivery.py outputs/delivery.json
 ```
+
+```bash
+python3 scripts/research_log.py merge research/<案例目录>
+```
+
+并行调查时先跑 `merge`：它逐个校验分片、统一编号、按 URL 去重来源、合并同组事件，并在合并后重算 `corroborated`。冲突与降级写进 `merge-report.json`，由协调者裁决或转入下一轮计划。打包与安装用 `python3 scripts/package.py --version r11 --install`。
 
 把输出与 `records.jsonl`、来源目录和线索队列对照；页面里有、台账里没有的原文、附件、历史域名和本人账号地址，补成线索或写明为何不用。`check_events.py` 会拒绝缺 `scope`/`evidence_type` 的事件，以及同组来源或单源支撑的 `corroborated` 事件。`check_delivery.py` 会拒绝缺预算、缺停止原因或下一轮计划缺停止条件的交付。完整检查表见 `references/dossier-format.md`。
 

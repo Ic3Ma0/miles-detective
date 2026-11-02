@@ -23,6 +23,19 @@ Input is a JSON object (usually `delivery.json`) with:
 If `open_gaps` > 0, `next_plans` must have at least one entry. Each plan must
 state what would make the search stop.
 
+When the investigation ran with shards, `delivery.json` also carries:
+
+    "parallel": {
+      "workers": 3,
+      "shards": [{"id": "s01-news", "family": "新闻与特稿",
+                  "stop_reason": "...", "open_gaps": 4}],
+      "merge": {"report": "merge-report.json", "conflicts": 1,
+                "deduped_events": 5, "corroborated_downgraded": 2}
+    }
+
+The parallel block is only valid for `mode: online`; every shard needs a stop
+reason, and the merge report path plus its counts are required.
+
 This checks structure only; it does not judge whether the budget is sensible.
 """
 import argparse
@@ -69,6 +82,45 @@ def validate_delivery(data):
         if plan["gap"] in seen:
             raise DeliveryError(f"重复的缺口：{plan['gap']}")
         seen.add(plan["gap"])
+    validate_parallel(data)
+
+
+def validate_parallel(data):
+    parallel = data.get("parallel")
+    if parallel is None or parallel is False:
+        return
+    if not isinstance(parallel, dict):
+        raise DeliveryError("parallel 须为对象、false 或省略")
+    if data["mode"] != "online":
+        raise DeliveryError("parallel 只适用于 mode=online")
+    workers = parallel.get("workers")
+    if not isinstance(workers, int) or isinstance(workers, bool) or not 1 <= workers <= 4:
+        raise DeliveryError("parallel.workers 须为 1-4 的整数")
+    shards = parallel.get("shards")
+    if not isinstance(shards, list) or not shards:
+        raise DeliveryError("parallel.shards 不能为空")
+    seen = set()
+    for index, shard in enumerate(shards, 1):
+        if not isinstance(shard, dict):
+            raise DeliveryError(f"parallel.shards 第 {index} 项不是对象")
+        for key in ("id", "family", "stop_reason"):
+            if not nonempty(shard.get(key)):
+                raise DeliveryError(f"parallel.shards 第 {index} 项缺少非空 {key}")
+        if shard["id"] in seen:
+            raise DeliveryError(f"parallel.shards 分片 ID 重复：{shard['id']}")
+        seen.add(shard["id"])
+        gaps = shard.get("open_gaps", 0)
+        if not isinstance(gaps, int) or isinstance(gaps, bool) or gaps < 0:
+            raise DeliveryError(f"parallel.shards 第 {index} 项 open_gaps 须为非负整数")
+    merge = parallel.get("merge")
+    if not isinstance(merge, dict):
+        raise DeliveryError("parallel.merge 须为对象")
+    if not nonempty(merge.get("report")):
+        raise DeliveryError("parallel.merge.report 不能为空")
+    for key in ("conflicts", "deduped_events", "corroborated_downgraded"):
+        value = merge.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise DeliveryError(f"parallel.merge.{key} 须为非负整数")
 
 
 def main():

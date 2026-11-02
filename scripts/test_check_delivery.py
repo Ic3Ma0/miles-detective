@@ -76,6 +76,66 @@ class CheckDeliveryTests(unittest.TestCase):
         with self.assertRaises(check_delivery.DeliveryError):
             check_delivery.validate_delivery(delivery(open_gaps=-1))
 
+    def parallel_delivery(self, **changes):
+        item = delivery(mode="online", parallel={
+            "workers": 3,
+            "shards": [
+                {"id": "s01-news", "family": "新闻与特稿", "stop_reason": "新检索只产生同源转载", "open_gaps": 1},
+                {"id": "s02-forum", "family": "论坛与旧社区", "stop_reason": "旧站需要 Wayback", "open_gaps": 2},
+            ],
+            "merge": {"report": "merge-report.json", "conflicts": 1,
+                      "deduped_events": 2, "corroborated_downgraded": 1},
+        })
+        item.update(changes)
+        return item
+
+    def test_valid_parallel_delivery(self):
+        check_delivery.validate_delivery(self.parallel_delivery())
+
+    def test_parallel_false_allowed(self):
+        check_delivery.validate_delivery(delivery(mode="online", parallel=False))
+
+    def test_parallel_requires_online_mode(self):
+        item = self.parallel_delivery()
+        item["mode"] = "desk_review"
+        with self.assertRaises(check_delivery.DeliveryError):
+            check_delivery.validate_delivery(item)
+
+    def test_parallel_worker_limit(self):
+        for workers in (0, 5):
+            item = self.parallel_delivery()
+            item["parallel"]["workers"] = workers
+            with self.assertRaises(check_delivery.DeliveryError):
+                check_delivery.validate_delivery(item)
+
+    def test_parallel_requires_shards(self):
+        item = self.parallel_delivery()
+        item["parallel"]["shards"] = []
+        with self.assertRaises(check_delivery.DeliveryError):
+            check_delivery.validate_delivery(item)
+
+    def test_parallel_shard_requires_stop_reason(self):
+        item = self.parallel_delivery()
+        item["parallel"]["shards"][0].pop("stop_reason")
+        with self.assertRaises(check_delivery.DeliveryError):
+            check_delivery.validate_delivery(item)
+
+    def test_parallel_duplicate_shard_id_rejected(self):
+        item = self.parallel_delivery()
+        item["parallel"]["shards"][1]["id"] = "s01-news"
+        with self.assertRaises(check_delivery.DeliveryError):
+            check_delivery.validate_delivery(item)
+
+    def test_parallel_merge_requires_report_and_counts(self):
+        item = self.parallel_delivery()
+        item["parallel"]["merge"].pop("report")
+        with self.assertRaises(check_delivery.DeliveryError):
+            check_delivery.validate_delivery(item)
+        item = self.parallel_delivery()
+        item["parallel"]["merge"]["conflicts"] = -1
+        with self.assertRaises(check_delivery.DeliveryError):
+            check_delivery.validate_delivery(item)
+
     def test_cli_pass(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "delivery.json"

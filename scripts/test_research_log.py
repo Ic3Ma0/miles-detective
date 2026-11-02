@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from research_log import RecordError, append, records, report, validate
+from research_log import RecordError, append, merge_case, records, report, validate
 
 
 class ResearchLogTests(unittest.TestCase):
@@ -245,6 +245,143 @@ class ResearchLogTests(unittest.TestCase):
         )
         with self.assertRaises(RecordError):
             append(self.case, event)
+
+
+class MergeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.case = Path(self.temp.name) / "case"
+        self.case.mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def search(self, sid="Q1"):
+        return {"kind": "search", "id": sid, "engine": "fixture", "queries": ["人物"], "raw_path": "raw/B01.json"}
+
+    def visit(self, sid="V1", outcome="content"):
+        return {"kind": "visit", "id": sid, "url": "https://example.org/post", "method": "open",
+                "outcome": outcome, "detail": "测试夹具", "raw_path": "raw/B01.json"}
+
+    def source(self, sid="S1", url="https://example.org/a", group="origin", visits=("V1",)):
+        return {"kind": "source", "id": sid, "title": "来源", "url": url, "voice": "self",
+                "form": "original", "access": "full_text", "identity": "confirmed",
+                "visit_ids": list(visits), "same_source_group": group, "limitation": "测试夹具"}
+
+    def claim(self, sid="C1", source_id="S1", status="documented_statement"):
+        return {"kind": "claim", "id": sid, "text": "原文这样说", "status": status,
+                "evidence": [{"source_id": source_id, "locator": "正文", "relation": "supports"}]}
+
+    def event(self, sid="EV1", source_ids=("S1",), status="documented", group=None,
+              date="2020-01-01", title="事件", place="北京"):
+        item = {"kind": "event", "id": sid, "date": date, "date_precision": "day",
+                "scope": "main", "evidence_type": "journalist_report", "title": title,
+                "summary": "摘要", "place": place, "status": status, "source_ids": list(source_ids)}
+        if group:
+            item["same_event_group"] = group
+        return item
+
+    def coverage(self, sid="CV1", refs=("S1",)):
+        return {"kind": "coverage", "id": sid, "family": "新闻", "scope": "全时段",
+                "state": "searched", "reason": "已检查", "record_ids": list(refs)}
+
+    def write_shard(self, shard_id, rows):
+        directory = self.case / "shards" / shard_id
+        (directory / "raw").mkdir(parents=True)
+        (directory / "raw" / "B01.json").write_text("{}")
+        (directory / "shard.json").write_text(json.dumps(
+            {"id": shard_id, "family": "新闻", "status": "complete", "stop_reason": "测试停止"}, ensure_ascii=False))
+        (directory / "records.jsonl").write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+
+    def test_merge_remaps_ids_references_and_raw_paths(self):
+        self.write_shard("s01", [self.search(), self.visit(), self.source(url="https://example.org/s01"),
+                                 self.claim(), self.event(), self.coverage()])
+        self.write_shard("s02", [self.search(), self.visit(), self.source(url="https://example.org/s02"),
+                                 self.claim(), self.event(), self.coverage()])
+        report_data, merged = merge_case(self.case)
+        by_kind = {}
+        for row in merged:
+            by_kind.setdefault(row["kind"], []).append(row)
+        self.assertEqual([row["id"] for row in by_kind["search"]], ["Q01", "Q02"])
+        self.assertEqual([row["id"] for row in by_kind["source"]], ["S01", "S02"])
+        self.assertEqual([row["id"] for row in by_kind["event"]], ["EV01", "EV02"])
+        self.assertEqual(by_kind["visit"][0]["raw_path"], "shards/s01/raw/B01.json")
+        self.assertEqual(by_kind["event"][0]["source_ids"], ["S01"])
+        self.assertEqual(by_kind["coverage"][0]["record_ids"], ["S01"])
+        self.assertEqual(report_data["counts"]["output_records"], 12)
+        self.assertTrue((self.case / "records.jsonl").is_file())
+        self.assertTrue((self.case / "merge-report.json").is_file())
+
+    def test_merge_dedupes_same_url_and_downgrades_corroborated(self):
+        self.write_shard("s01", [
+            self.search(), self.visit("V1"), self.visit("V2", "content"),
+            self.source("S1", url="https://example.org/same", group="a", visits=("V1",)),
+            self.source("S2", url="https://example.org/same", group="b", visits=("V2",)),
+            self.event(source_ids=("S1", "S2"), status="corroborated"),
+        ])
+        report_data, merged = merge_case(self.case)
+        sources = [row for row in merged if row["kind"] == "source"]
+        events = [row for row in merged if row["kind"] == "event"]
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["status"], "documented")
+        self.assertEqual(len(report_data["source_duplicates"]), 1)
+        self.assertEqual(len(report_data["corroborated_downgraded"]), 1)
+
+    def test_merge_keeps_corroborated_with_independent_shard_sources(self):
+        self.write_shard("s01", [
+            self.search(), self.visit("V1"), self.visit("V2", "content"),
+            self.source("S1", url="https://a.example/1", group="a", visits=("V1",)),
+            self.source("S2", url="https://a.example/2", group="b", visits=("V2",)),
+            self.event(source_ids=("S1", "S2"), status="corroborated", group="shared"),
+        ])
+        self.write_shard("s02", [
+            self.search(), self.visit("V1"), self.visit("V2", "content"),
+            self.source("S1", url="https://b.example/1", group="a", visits=("V1",)),
+            self.source("S2", url="https://b.example/2", group="b", visits=("V2",)),
+            self.event(source_ids=("S1", "S2"), status="corroborated", group="shared"),
+            self.coverage(refs=("EV1",)),
+        ])
+        report_data, merged = merge_case(self.case)
+        events = [row for row in merged if row["kind"] == "event"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["status"], "corroborated")
+        self.assertEqual(len(events[0]["source_ids"]), 4)
+        coverage = [row for row in merged if row["kind"] == "coverage"][0]
+        self.assertEqual(coverage["record_ids"], [events[0]["id"]])
+        self.assertEqual(len(report_data["event_merged"]), 1)
+
+    def test_merge_flags_same_date_title_place_without_group(self):
+        self.write_shard("s01", [self.search(), self.visit(), self.source(), self.event()])
+        self.write_shard("s02", [self.search(), self.visit(), self.source(), self.event()])
+        report_data, merged = merge_case(self.case)
+        self.assertEqual(len([row for row in merged if row["kind"] == "event"]), 2)
+        self.assertEqual(len(report_data["duplicate_candidates"]), 1)
+        self.assertEqual(len(report_data["duplicate_candidates"][0]["events"]), 2)
+
+    def test_merge_conflict_keeps_events_separate(self):
+        self.write_shard("s01", [self.search(), self.visit(), self.source(),
+                                 self.event(date="2020-01-01", group="shared")])
+        self.write_shard("s02", [self.search(), self.visit(), self.source(),
+                                 self.event(date="2021-01-01", group="shared")])
+        report_data, merged = merge_case(self.case)
+        self.assertEqual(len([row for row in merged if row["kind"] == "event"]), 2)
+        self.assertEqual(len(report_data["conflicts"]), 1)
+        self.assertEqual(report_data["conflicts"][0]["date"], ["2020-01-01", "2021-01-01"])
+
+    def test_merge_refuses_non_empty_target_without_force(self):
+        self.write_shard("s01", [self.search(), self.visit(), self.source()])
+        (self.case / "records.jsonl").write_text('{"existing": true}\n', encoding="utf-8")
+        with self.assertRaises(RecordError):
+            merge_case(self.case)
+
+    def test_merge_dry_run_writes_nothing(self):
+        self.write_shard("s01", [self.search(), self.visit(), self.source()])
+        report_data, merged = merge_case(self.case, dry_run=True)
+        self.assertTrue(merged)
+        self.assertFalse((self.case / "records.jsonl").exists())
+        self.assertFalse((self.case / "merge-report.json").exists())
 
 
 if __name__ == "__main__":

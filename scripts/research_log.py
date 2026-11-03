@@ -286,9 +286,12 @@ def report(case):
     lines.extend(["", "| 来源家族 | 状态 | 实际范围 | 原因 |", "|---|---|---|---|"])
     for r in by_kind["coverage"]:
         lines.append("| " + " | ".join(cell(r[k]) for k in ("family", "state", "scope", "reason")) + " |")
-    lines.extend(["", "| 线索 | 状态 | 问题 | 下一步 |", "|---|---|---|---|"])
-    for r in by_kind["clue"]:
-        lines.append("| " + " | ".join(cell(r[k]) for k in ("id", "state", "question", "next_step")) + " |")
+    lines.extend(["", "| 线索 | 优先级 | 状态 | 来源关联 | 问题 | 下一步 |", "|---|---|---|---|---|---|"])
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    for r in sorted(by_kind["clue"], key=lambda clue: priority_order[clue["priority"]]):
+        lines.append("| " + " | ".join(cell(v) for v in (
+            r["id"], r["priority"], r["state"], ", ".join(r["origin_ids"]),
+            r["question"], r["next_step"])) + " |")
     lines.extend(["", "这是结构化记录的摘要，不能替代带证据定位的正文及人工核验。", ""])
     return "\n".join(lines)
 

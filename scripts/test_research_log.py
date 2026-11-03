@@ -70,6 +70,23 @@ class ResearchLogTests(unittest.TestCase):
         self.assertIn("检索批次 1，查询词 2，访问行为 1，来源条目 0", result)
         self.assertIn("不代表独立证据数", result)
 
+    def test_report_prioritizes_clues_and_preserves_origin_links_without_rewriting_records(self):
+        append(self.case, [self.visit(), self.visit("V2")])
+        for rid, priority, origins in [
+            ("L1", "low", ["V1"]), ("L2", "high", ["V1", "V2"]),
+            ("L3", "medium", ["V2"]), ("L4", "high", ["V2"]),
+        ]:
+            append(self.case, {"kind": "clue", "id": rid, "state": "open",
+                               "priority": priority, "origin_ids": origins,
+                               "question": "转折 | 原因", "next_step": "查原始访谈"})
+        before = (self.case / "records.jsonl").read_bytes()
+        result = report(self.case)
+        self.assertIn("| 线索 | 优先级 | 状态 | 来源关联 | 问题 | 下一步 |", result)
+        rows = [line for line in result.splitlines() if line.startswith("| L")]
+        self.assertEqual([line.split(" | ")[0] for line in rows], ["| L2", "| L4", "| L3", "| L1"])
+        self.assertIn("| L2 | high | open | V1, V2 | 转折 \\| 原因 | 查原始访谈 |", result)
+        self.assertEqual((self.case / "records.jsonl").read_bytes(), before)
+
     def test_unknown_reference_and_missing_raw_file_rejected(self):
         with self.assertRaises(RecordError):
             append(self.case, self.source())

@@ -87,6 +87,64 @@ class ResearchLogTests(unittest.TestCase):
         self.assertIn("| L2 | high | open | V1, V2 | 转折 \\| 原因 | 查原始访谈 |", result)
         self.assertEqual((self.case / "records.jsonl").read_bytes(), before)
 
+    def test_corroborated_claim_requires_two_usable_independent_sources(self):
+        cases = [
+            ("single", ["S1"], "original", "independent", "full_text", False),
+            ("duplicate_evidence", ["S1", "S1"], "original", "independent", "full_text", False),
+            ("same_group", ["S1", "S2"], "original", "original", "full_text", False),
+            ("missing_group", ["S1", "S2"], "original", None, "full_text", False),
+            ("unretrieved", ["S1", "S2"], "original", "independent", "unretrieved", False),
+            ("independent", ["S1", "S2"], "original", "independent", "full_text", True),
+        ]
+        for name, ids, group1, group2, access2, accepted in cases:
+            with self.subTest(name=name):
+                source2 = self.source(access2, sid="S2", group=group2)
+                source2["url"] = "https://example.org/independent"
+                rows = [self.visit(outcome="content"), self.source("full_text", group=group1), source2]
+                claim = self.claim("corroborated")
+                claim["evidence"] = [{"source_id": sid, "locator": "正文", "relation": "supports"} for sid in ids]
+                if accepted:
+                    self.assertEqual(validate(rows + [claim], self.case)["C1"]["status"], "corroborated")
+                else:
+                    with self.assertRaises(RecordError):
+                        validate(rows + [claim], self.case)
+
+    def test_corroborated_claim_rejects_duplicate_url_and_context_only_support(self):
+        for same_url, relation in [(True, "supports"), (False, "context"), (False, "contradicts")]:
+            with self.subTest(same_url=same_url, relation=relation):
+                source2 = self.source("full_text", sid="S2", group="independent")
+                if not same_url:
+                    source2["url"] = "https://example.org/independent"
+                claim = self.claim("corroborated")
+                claim["evidence"].append({"source_id": "S2", "locator": "正文", "relation": relation})
+                with self.assertRaises(RecordError):
+                    validate([self.visit(outcome="content"), self.source("full_text", group="original"), source2, claim], self.case)
+
+    def test_corroborated_claim_keeps_valid_pair_with_extra_ungrouped_source(self):
+        source2 = self.source("full_text", sid="S2", group="independent")
+        source2["url"] = "https://example.org/second"
+        source3 = self.source("full_text", sid="S3")
+        source3["url"] = "https://example.org/third"
+        claim = self.claim("corroborated")
+        claim["evidence"].extend({"source_id": sid, "locator": "正文", "relation": "supports"} for sid in ["S2", "S3"])
+        rows = [self.visit(outcome="content"), self.source("full_text", group="original"), source2, source3, claim]
+        self.assertEqual(validate(rows, self.case)["C1"]["status"], "corroborated")
+
+    def test_corroborated_claim_rechecked_after_source_correction(self):
+        source2 = self.source("full_text", sid="S2", group="independent")
+        source2["url"] = "https://example.org/independent"
+        claim = self.claim("corroborated")
+        claim["evidence"].append({"source_id": "S2", "locator": "正文", "relation": "supports"})
+        append(self.case, [self.visit(outcome="content"), self.source("full_text", group="original"), source2, claim])
+        before = (self.case / "records.jsonl").read_bytes()
+        for correction in [dict(source2, same_source_group="original"), dict(source2, access="unretrieved")]:
+            with self.assertRaises(RecordError):
+                append(self.case, correction)
+            self.assertEqual((self.case / "records.jsonl").read_bytes(), before)
+        downgraded = dict(claim, status="documented_statement")
+        append(self.case, [downgraded, dict(source2, same_source_group="original")])
+        self.assertEqual(validate(records(self.case), self.case)["C1"]["status"], "documented_statement")
+
     def test_unknown_reference_and_missing_raw_file_rejected(self):
         with self.assertRaises(RecordError):
             append(self.case, self.source())

@@ -48,6 +48,18 @@ ACCESS_OUTCOMES = {
 }
 
 
+def claim_is_corroborated(record, sources):
+    """Check declared independence, not whether the underlying claim is true."""
+    supported = {ev["source_id"] for ev in record.get("evidence", [])
+                 if ev.get("relation") == "supports"
+                 and ev.get("source_id") in sources
+                 and sources[ev["source_id"]]["access"] not in {"unretrieved", "search_only"}
+                 and nonempty(sources[ev["source_id"]].get("same_source_group"))}
+    groups = [sources[sid].get("same_source_group") for sid in supported]
+    urls = {sources[sid]["url"] for sid in supported}
+    return len(urls) >= 2 and len(set(groups)) >= 2
+
+
 def nonempty(value):
     return isinstance(value, str) and bool(value.strip())
 
@@ -136,6 +148,8 @@ def validate(items, case):
                     usable = True
             if record["status"] != "unverified" and not usable:
                 raise RecordError(f"{rid}: 已记载/分析结论不能只有未取得材料或搜索摘要")
+            if record["status"] == "corroborated" and not claim_is_corroborated(record, latest):
+                raise RecordError(f"{rid}: corroborated 须有两个已取得、不同 URL 且标明不同同源组的支持来源")
         elif kind == "event":
             sources = refs("source_ids", "source")
             claims = refs("claim_ids", "claim")
@@ -225,6 +239,8 @@ def validate(items, case):
         if record["kind"] == "claim" and record["status"] != "unverified":
             if not any(latest[e["source_id"]]["access"] not in {"unretrieved", "search_only"} and e["relation"] == "supports" for e in record["evidence"]):
                 raise RecordError(f"{record['id']}: 最新来源状态已不能支撑该结论")
+        if record["kind"] == "claim" and record["status"] == "corroborated" and not claim_is_corroborated(record, latest):
+            raise RecordError(f"{record['id']}: 最新来源状态已不能支撑两个独立来源的 corroborated 结论")
     return latest
 
 
@@ -527,10 +543,7 @@ def merge_case(case, report_path=None, force=False, dry_run=False):
                 record["merge_note"] = "合并后台账复核：不足两个独立来源或两个同源组，降为 documented"
                 downgraded.append({"id": record["id"], "kind": "event", "reason": record["merge_note"]})
         elif record["kind"] == "claim" and record.get("status") == "corroborated":
-            supported = [evidence["source_id"] for evidence in record.get("evidence", [])
-                         if evidence.get("relation") == "supports" and evidence.get("source_id") in sources]
-            keys, groups = source_groups(supported, [])
-            if len(keys) < 2 or len(groups) < 2:
+            if not claim_is_corroborated(record, sources):
                 record["status"] = "documented_statement"
                 record["merge_note"] = "合并后台账复核：不足两个独立来源或两个同源组，降为 documented_statement"
                 downgraded.append({"id": record["id"], "kind": "claim", "reason": record["merge_note"]})

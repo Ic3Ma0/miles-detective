@@ -10,8 +10,10 @@ import sys
 from urllib.parse import urlsplit
 
 
-class RecordError(ValueError):
-    pass
+from evidence import (EvidenceError as RecordError, validate_event_structure,
+                      event_support, check_event_evidence, claim_support,
+                      independent_pair, canonical_groups, ENUMS as EVENT_ENUMS,
+                      REQUIRED as EVENT_REQUIRED)
 
 
 ENUMS = {
@@ -23,10 +25,7 @@ ENUMS = {
         "identity": {"confirmed", "supported", "unresolved", "not_applicable"},
     },
     "claim": {"status": {"documented_statement", "corroborated", "disputed", "unverified", "analysis"}},
-    "event": {"status": {"documented", "corroborated", "disputed", "unverified"},
-              "date_precision": {"day", "month", "year", "range", "unknown"},
-              "scope": {"main", "background", "outside_window"},
-              "evidence_type": {"self_account", "journalist_report", "institution_record", "mixed", "unknown"}},
+    "event": EVENT_ENUMS,
     "clue": {"state": {"open", "blocked", "resolved", "deferred"}, "priority": {"high", "medium", "low"}},
     "coverage": {"state": {"unsearched", "searched", "partial", "blocked", "deferred", "not_applicable"}},
 }
@@ -35,7 +34,7 @@ REQUIRED = {
     "visit": ("url", "method", "detail", "raw_path"),
     "source": ("title", "url", "limitation"),
     "claim": ("text",),
-    "event": ("title", "summary", "status", "date_precision", "scope", "evidence_type"),
+    "event": tuple(key for key in EVENT_REQUIRED if key != "id"),
     "clue": ("question", "next_step"),
     "coverage": ("family", "scope", "reason"),
 }
@@ -50,14 +49,7 @@ ACCESS_OUTCOMES = {
 
 def claim_is_corroborated(record, sources):
     """Check declared independence, not whether the underlying claim is true."""
-    supported = {ev["source_id"] for ev in record.get("evidence", [])
-                 if ev.get("relation") == "supports"
-                 and ev.get("source_id") in sources
-                 and sources[ev["source_id"]]["access"] not in {"unretrieved", "search_only"}
-                 and nonempty(sources[ev["source_id"]].get("same_source_group"))}
-    groups = [sources[sid].get("same_source_group") for sid in supported]
-    urls = {sources[sid]["url"] for sid in supported}
-    return len(urls) >= 2 and len(set(groups)) >= 2
+    return independent_pair(claim_support(record, sources))
 
 
 def nonempty(value):
@@ -135,7 +127,6 @@ def validate(items, case):
             evidence = record.get("evidence")
             if not isinstance(evidence, list) or not evidence:
                 raise RecordError(f"{rid}: 结论须列出 evidence")
-            usable = False
             for ev in evidence:
                 if not isinstance(ev, dict):
                     raise RecordError(f"{rid}: evidence 项须为对象")
@@ -144,82 +135,21 @@ def validate(items, case):
                     raise RecordError(f"{rid}: 缺少有效来源/定位")
                 if ev.get("relation") not in {"supports", "contradicts", "context"}:
                     raise RecordError(f"{rid}: evidence.relation 无效")
-                if latest[sid]["access"] not in {"unretrieved", "search_only"} and ev["relation"] == "supports":
-                    usable = True
-            if record["status"] != "unverified" and not usable:
+            if record["status"] != "unverified" and not claim_support(record, latest):
                 raise RecordError(f"{rid}: 已记载/分析结论不能只有未取得材料或搜索摘要")
             if record["status"] == "corroborated" and not claim_is_corroborated(record, latest):
                 raise RecordError(f"{rid}: corroborated 须有两个已取得、不同 URL 且标明不同同源组的支持来源")
         elif kind == "event":
-            sources = refs("source_ids", "source")
-            claims = refs("claim_ids", "claim")
-            locators = record.get("sources", [])
-            if not isinstance(locators, list):
-                raise RecordError(f"{rid}: sources 须为数组")
-            if not sources and not claims and not locators:
-                raise RecordError(f"{rid}: 事件须引用至少一个来源、结论或定位")
-            locator_source_ids = []
-            for loc in locators:
-                if not isinstance(loc, dict):
-                    raise RecordError(f"{rid}: sources 项须为对象")
+            refs("source_ids", "source")
+            refs("claim_ids", "claim")
+            validate_event_structure(record, rid)
+            for loc in record.get("sources", []):
                 explicit = loc.get("source_id")
-                sid = explicit or loc.get("id")
-                file_name = loc.get("file")
-                if not nonempty(sid) and not nonempty(file_name):
-                    raise RecordError(f"{rid}: sources 项须有 source_id、id 或 file")
-                if nonempty(explicit):
-                    if explicit not in latest or kinds[explicit] != "source":
-                        raise RecordError(f"{rid}: 未知来源引用 {explicit!r}")
-                    locator_source_ids.append(explicit)
-                elif nonempty(sid) and sid in latest and kinds[sid] == "source":
-                    locator_source_ids.append(sid)
-                if "lines" in loc and not nonempty(str(loc["lines"])):
-                    raise RecordError(f"{rid}: sources.lines 不能为空")
-                if "group" in loc and not nonempty(loc["group"]):
-                    raise RecordError(f"{rid}: sources.group 不能为空")
-            if record["date_precision"] != "unknown" and not nonempty(record.get("date")):
-                raise RecordError(f"{rid}: 非 unknown 日期精度须有 date")
-            if "people" in record and (not isinstance(record["people"], list) or not all(nonempty(p) for p in record["people"])):
-                raise RecordError(f"{rid}: people 须为非空字符串数组")
+                if explicit and (explicit not in latest or kinds[explicit] != "source"):
+                    raise RecordError(f"{rid}: 未知来源引用 {explicit!r}")
             if "same_event_group" in record and not nonempty(record["same_event_group"]):
                 raise RecordError(f"{rid}: same_event_group 不能为空")
-            if record["status"] != "unverified":
-                usable_source = any(latest[s]["access"] not in {"unretrieved", "search_only"} for s in sources)
-                usable_claim = any(latest[c]["status"] != "unverified" for c in claims)
-                if not (usable_source or usable_claim or locators):
-                    raise RecordError(f"{rid}: 已记载事件不能只有未取得材料或搜索摘要")
-            if record["status"] == "corroborated":
-                keys = {f"id:{sid}" for sid in sources}
-                for loc in locators:
-                    sid = loc.get("source_id") or loc.get("id")
-                    if nonempty(sid):
-                        keys.add(f"id:{sid}")
-                    elif nonempty(loc.get("file")):
-                        keys.add(f"file:{loc['file']}")
-                if len(keys) < 2:
-                    raise RecordError(f"{rid}: corroborated 事件至少需要两个不同来源")
-                groups = set()
-                for sid in dict.fromkeys(sources + locator_source_ids):
-                    group = latest[sid].get("same_source_group")
-                    if not nonempty(group):
-                        raise RecordError(f"{rid}: corroborated 来源 {sid} 须标 same_source_group")
-                    groups.add(group)
-                for loc in locators:
-                    sid = loc.get("source_id") or loc.get("id")
-                    if nonempty(sid):
-                        group = loc.get("group")
-                        if sid in latest and kinds[sid] == "source":
-                            group = group or latest[sid].get("same_source_group")
-                        if not nonempty(group):
-                            raise RecordError(f"{rid}: corroborated 的来源 {sid} 须标 group")
-                        groups.add(group)
-                    else:
-                        group = loc.get("group")
-                        if not nonempty(group):
-                            raise RecordError(f"{rid}: corroborated 的文件定位须标 group")
-                        groups.add(group)
-                if len(groups) < 2:
-                    raise RecordError(f"{rid}: corroborated 的来源属于同一同源组")
+            check_event_evidence(record, {s: r for s, r in latest.items() if r["kind"] == "source"}, latest)
         elif kind == "clue":
             refs("origin_ids", required=True)
         elif kind == "coverage":
@@ -237,10 +167,12 @@ def validate(items, case):
             if not any(latest[v]["outcome"] in ACCESS_OUTCOMES[record["access"]] for v in record.get("visit_ids", [])):
                 raise RecordError(f"{record['id']}: 最新访问分类已不能支撑获取层级")
         if record["kind"] == "claim" and record["status"] != "unverified":
-            if not any(latest[e["source_id"]]["access"] not in {"unretrieved", "search_only"} and e["relation"] == "supports" for e in record["evidence"]):
+            if not claim_support(record, latest):
                 raise RecordError(f"{record['id']}: 最新来源状态已不能支撑该结论")
         if record["kind"] == "claim" and record["status"] == "corroborated" and not claim_is_corroborated(record, latest):
             raise RecordError(f"{record['id']}: 最新来源状态已不能支撑两个独立来源的 corroborated 结论")
+        if record["kind"] == "event":
+            check_event_evidence(record, {s: r for s, r in latest.items() if r["kind"] == "source"}, latest)
     return latest
 
 
@@ -422,6 +354,16 @@ def merge_case(case, report_path=None, force=False, dry_run=False):
         provisional_id = provisional[key]
         return source_merge.get(provisional_id, provisional_id)
 
+    # Duplicate URLs connect the shard-local names for the same origin.
+    group_mapping = canonical_groups(
+        (record["url"], f"{shard_id}/{record['same_source_group']}")
+        for shard_id, _, record in ordered
+        if record["kind"] == "source" and nonempty(record.get("same_source_group")))
+
+    def mapped_group(shard_id, group):
+        name = f"{shard_id}/{group}"
+        return group_mapping.get(name, name)
+
     output = []
     for shard_id, old_id, record in ordered:
         provisional_id = provisional[(shard_id, old_id)]
@@ -436,18 +378,24 @@ def merge_case(case, report_path=None, force=False, dry_run=False):
         for evidence in merged.get("evidence", []):
             if "source_id" in evidence:
                 evidence["source_id"] = final_id(shard_id, evidence["source_id"])
+        if "source_groups" in merged:
+            merged["source_groups"] = {
+                final_id(shard_id, sid) if (shard_id, sid) in provisional else f"{shard_id}/{sid}": mapped_group(shard_id, group)
+                for sid, group in merged["source_groups"].items()}
         for locator in merged.get("sources", []):
             for key in ("source_id", "id"):
                 if key in locator:
-                    locator[key] = final_id(shard_id, locator[key])
+                    locator[key] = (final_id(shard_id, locator[key])
+                                    if (shard_id, locator[key]) in provisional
+                                    else f"{shard_id}/{locator[key]}")
             if nonempty(locator.get("group")):
-                locator["group"] = f"{shard_id}/{locator['group']}"
+                locator["group"] = mapped_group(shard_id, locator["group"])
             if nonempty(locator.get("file")) and not locator["file"].startswith("shards/"):
                 locator["file"] = f"shards/{shard_id}/{locator['file']}"
         if merged["kind"] in {"search", "visit"} and not merged["raw_path"].startswith("shards/"):
             merged["raw_path"] = f"shards/{shard_id}/{merged['raw_path']}"
         if nonempty(merged.get("same_source_group")):
-            merged["same_source_group"] = f"{shard_id}/{merged['same_source_group']}"
+            merged["same_source_group"] = mapped_group(shard_id, merged["same_source_group"])
         if merged["kind"] == "source" and provisional_id in source_unions:
             union = source_unions[provisional_id]
             merged["visit_ids"] = list(dict.fromkeys(
@@ -458,7 +406,7 @@ def merge_case(case, report_path=None, force=False, dry_run=False):
             if union["accesses"]:
                 merged["access"] = max(union["accesses"], key=lambda value: ACCESS_RANK.get(value, -1))
             if not nonempty(merged.get("same_source_group")) and union["group"]:
-                merged["same_source_group"] = union["group"]
+                merged["same_source_group"] = group_mapping.get(union["group"], union["group"])
         output.append(merged)
 
     output.sort(key=lambda record: (KIND_ORDER[record["kind"]], id_number(record), record.get("shard_id", "")))
@@ -518,38 +466,16 @@ def merge_case(case, report_path=None, force=False, dry_run=False):
     sources = {record["id"]: record for record in output if record["kind"] == "source"}
     downgraded = []
 
-    def source_groups(source_ids, locators):
-        keys, groups = set(), set()
-        for source_id in source_ids:
-            keys.add(f"id:{source_id}")
-            group = sources.get(source_id, {}).get("same_source_group")
-            if nonempty(group):
-                groups.add(group)
-        for locator in locators:
-            source_id = locator.get("source_id") or locator.get("id")
-            if nonempty(source_id):
-                keys.add(f"id:{source_id}")
-                group = locator.get("group") or sources.get(source_id, {}).get("same_source_group")
-                if nonempty(group):
-                    groups.add(group)
-            elif nonempty(locator.get("file")):
-                keys.add(f"file:{locator['file']}")
-                if nonempty(locator.get("group")):
-                    groups.add(locator["group"])
-        return keys, groups
-
     for record in output:
-        if record["kind"] == "event" and record.get("status") == "corroborated":
-            keys, groups = source_groups(record.get("source_ids", []), record.get("sources", []))
-            if len(keys) < 2 or len(groups) < 2:
-                record["status"] = "documented"
-                record["merge_note"] = "合并后台账复核：不足两个独立来源或两个同源组，降为 documented"
-                downgraded.append({"id": record["id"], "kind": "event", "reason": record["merge_note"]})
-        elif record["kind"] == "claim" and record.get("status") == "corroborated":
-            if not claim_is_corroborated(record, sources):
-                record["status"] = "documented_statement"
-                record["merge_note"] = "合并后台账复核：不足两个独立来源或两个同源组，降为 documented_statement"
-                downgraded.append({"id": record["id"], "kind": "claim", "reason": record["merge_note"]})
+        kind = record["kind"]
+        if kind not in {"event", "claim"} or record.get("status") != "corroborated":
+            continue
+        support = event_support(record, sources) if kind == "event" else claim_support(record, sources)
+        if not independent_pair(support):
+            target_status = "documented" if kind == "event" else "documented_statement"
+            record["status"] = target_status
+            record["merge_note"] = f"合并后台账复核：不足两个已取得、不同 URL 且不同同源组的支持来源，降为 {target_status}"
+            downgraded.append({"id": record["id"], "kind": kind, "reason": record["merge_note"]})
 
     for index, record in enumerate(output, 1):
         record["event_id"] = f"E{index:06d}"

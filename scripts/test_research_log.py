@@ -279,7 +279,7 @@ class ResearchLogTests(unittest.TestCase):
     def test_corroborated_event_different_groups_accepted(self):
         append(self.case, [
             self.visit("V1", "content"), self.source("full_text", ["V1"], "S1", "torrentfreak"),
-            self.visit("V2", "content"), self.source("full_text", ["V2"], "S2", "cnbc"),
+            self.visit("V2", "content"), {**self.source("full_text", ["V2"], "S2", "cnbc"), "url": "https://example.org/independent"},
         ])
         append(self.case, self.event(status="corroborated", source_ids=["S1", "S2"], claim_ids=[]))
         self.assertIn("corroborated", report(self.case))
@@ -374,19 +374,22 @@ class MergeTests(unittest.TestCase):
         self.assertTrue((self.case / "merge-report.json").is_file())
 
     def test_merge_dedupes_same_url_and_downgrades_corroborated(self):
-        self.write_shard("s01", [
-            self.search(), self.visit("V1"), self.visit("V2", "content"),
-            self.source("S1", url="https://example.org/same", group="a", visits=("V1",)),
-            self.source("S2", url="https://example.org/same", group="b", visits=("V2",)),
-            self.event(source_ids=("S1", "S2"), status="corroborated"),
-        ])
+        # Each input is valid. The earlier shard links the two URL groups;
+        # merging duplicate URLs then reveals that the later pair is not independent.
+        self.write_shard("s00", [self.visit(),
+            self.source("S1", url="https://example.org/a", group="shared"),
+            self.source("S2", url="https://example.org/b", group="shared")])
+        self.write_shard("s01", [self.visit(),
+            self.source("S1", url="https://example.org/a", group="a"),
+            self.source("S2", url="https://example.org/b", group="b"),
+            self.event(source_ids=("S1", "S2"), status="corroborated")])
         report_data, merged = merge_case(self.case)
         sources = [row for row in merged if row["kind"] == "source"]
         events = [row for row in merged if row["kind"] == "event"]
-        self.assertEqual(len(sources), 1)
+        self.assertEqual(len(sources), 2)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["status"], "documented")
-        self.assertEqual(len(report_data["source_duplicates"]), 1)
+        self.assertEqual(len(report_data["source_duplicates"]), 2)
         self.assertEqual(len(report_data["corroborated_downgraded"]), 1)
 
     def test_merge_keeps_corroborated_with_independent_shard_sources(self):

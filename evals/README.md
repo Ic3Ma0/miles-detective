@@ -44,3 +44,7 @@ python3 scripts/test_mc_to_records.py
 - 合并后没有同源重复，也没有错误的 `corroborated`。
 
 结果写进 `EVALUATION.md` 的并行调查一节；未达到通过线时，保留失败数据与原因，不调低阈值。
+
+## 自述归属行为验收
+
+使用 [固定材料与六类场景](self-report-attribution.md) 检查生成、改稿和核验。按场景保留实际输出及判断理由；结构测试通过不能代替正文语义验收。
